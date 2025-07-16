@@ -1,0 +1,96 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install Dependencies
+        run: npm ci
+      - name: Run Tests
+        run: npm test
+      - name: Build Docker Image
+        run: docker build -t myapp:${{ github.sha }} .
+      - name: Push to Azure Container Registry
+        run: |
+          docker login ${{ secrets.ACR_ENDPOINT }} -u ${{ secrets.ACR_USERNAME }} -p ${{ secrets.ACR_PASSWORD }}
+          docker tag myapp:${{ github.sha }} ${{ secrets.ACR_ENDPOINT }}/myapp:${{ github.sha }}
+          docker push ${{ secrets.ACR_ENDPOINT }}/myapp:${{ github.sha }}
+
+  deploy-dev:
+    needs: build
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to Dev
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ secrets.DEV_APP_NAME }}
+          slot-name: production
+          publish-profile: ${{ secrets.DEV_PUBLISH_PROFILE }}
+          images: ${{ secrets.ACR_ENDPOINT }}/myapp:${{ github.sha }}
+
+  deploy-uat:
+    needs: build
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    environment:
+      name: UAT
+      url: ${{ steps.deploy.outputs.webapp-url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to UAT
+        id: deploy
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ secrets.UAT_APP_NAME }}
+          slot-name: production
+          publish-profile: ${{ secrets.UAT_PUBLISH_PROFILE }}
+          images: ${{ secrets.ACR_ENDPOINT }}/myapp:${{ github.sha }}
+      - name: Notify Teams
+        uses: aliencube/microsoft-teams-actions@v0.17.0
+        with:
+          webhook_uri: ${{ secrets.TEAMS_WEBHOOK }}
+          title: "UAT Deployment"
+          summary: "Deployed to UAT: ${{ github.sha }}"
+          text: "Deployment to UAT completed successfully."
+
+  deploy-prod:
+    needs: deploy-uat
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: Prod
+      url: ${{ steps.deploy.outputs.webapp-url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to Prod
+        id: deploy
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ secrets.PROD_APP_NAME }}
+          slot-name: production
+          publish-profile: ${{ secrets.PROD_PUBLISH_PROFILE }}
+          images: ${{ secrets.ACR_ENDPOINT }}/myapp:${{ github.sha }}
+      - name: Notify Teams
+        uses: aliencube/microsoft-teams-actions@v0.17.0
+        with:
+          webhook_uri: ${{ secrets.TEAMS_WEBHOOK }}
+          title: "Prod Deployment"
+          summary: "Deployed to Prod: ${{ github.sha }}"
+          text: "Deployment to Prod completed successfully."
